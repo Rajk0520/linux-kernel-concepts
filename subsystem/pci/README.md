@@ -1,8 +1,8 @@
-# PCI/PCIe and MSI for Linux
+# PCI and PCIe for Linux
 
-Learning notes on PCI, PCI Express, Linux enumeration, BARs, MMIO, and interrupts.
+Learning notes on PCI/PCIe architecture, enumeration, configuration space, BAR resources, and MMIO in Linux.
 
-> **Scope and terminology.** PCIe keeps much of the PCI software model—configuration space, BDF addresses, BARs, bridges, and legacy INTx—but changes the electrical and link-level transport. Linux APIs hide many platform-specific details. These notes describe the common model; device and platform specifications remain authoritative.
+> **Scope and terminology.** PCIe keeps much of the PCI software model—configuration space, BDF addresses, BARs, and bridges—but changes the electrical and link-level transport. Linux APIs hide many platform-specific details. These notes describe the common model; device and platform specifications remain authoritative.
 
 ## Contents
 
@@ -18,10 +18,8 @@ Learning notes on PCI, PCI Express, Linux enumeration, BARs, MMIO, and interrupt
 10. [Linux BAR claim and mapping](#10-linux-bar-claim-and-mapping)
 11. [What happens during an MMIO access](#11-what-happens-during-an-mmio-access)
 12. [Posted writes and ordering](#12-posted-writes-and-ordering)
-13. [Interrupts: INTx, MSI, and MSI-X](#13-interrupts-intx-msi-and-msi-x)
-14. [MSI/MSI-X in a Linux driver](#14-msimsi-x-in-a-linux-driver)
-15. [Glossary and corrections to common mental models](#15-glossary-and-corrections-to-common-mental-models)
-16. [References](#16-references)
+13. [Glossary and corrections](#13-glossary-and-corrections)
+14. [References](#14-references)
 
 ## 1. PCI and PCIe
 
@@ -298,101 +296,26 @@ If software must ensure a posted MMIO write has reached the device before contin
 
 Prefetchability and write posting are related to device I/O behavior but are separate properties: prefetchability describes whether certain speculative/combined operations are safe; posting describes when a write is considered complete to the CPU.
 
-## 13. Interrupts: INTx, MSI, and MSI-X
-
-An interrupt is a notification that a device needs CPU attention. Interrupt delivery has several layers: device signaling, host bridge/interrupt-controller routing, Linux IRQ number/domain, and the registered driver handler.
-
-### 13.1 Legacy pin-based INTx
-
-Each PCI function supports at most one legacy interrupt pin. Its **Interrupt Pin** configuration-space field reports which pin it uses: INTA#, INTB#, INTC#, or INTD#. This pin identity is usually fixed by the function’s hardware design; neither firmware nor a normal driver selects it. The function asserts/deasserts its interrupt when its device-specific interrupt logic needs service.
-
-The four labels are not four processor IRQs. On conventional PCI, the signals are routed through slots/bridges and platform wiring. Bridge **swizzling** rotates pin identity as it crosses a bridge, and motherboard/platform routing maps the result to an interrupt controller input. On PCIe, legacy INTx is transported as Assert_INTx/Deassert_INTx messages to the root complex, which maps them to system IRQs. ACPI `_PRT` can describe legacy PCI interrupt routing on x86.
-
-Two functions that both report INTA# **may** end up on the same system/Linux IRQ, but INTA# alone does not decide the route. Device location, bridge swizzling, and platform routing matter. Different INTx pins may also converge on the same IRQ.
-
-Legacy interrupts are level-triggered and can be shared. In Linux, multiple drivers can register handlers on the same IRQ using `IRQF_SHARED` and a unique `dev_id`. When that IRQ fires, the IRQ subsystem invokes the handlers associated with it. Each handler checks a device status/cause register: it services its own device and returns `IRQ_HANDLED`, or returns `IRQ_NONE` if the interrupt came from another sharer. The device must clear/deassert its interrupt cause. A driver that leaves its interrupt asserted can cause an interrupt storm (“screaming interrupt”).
-
-### 13.2 MSI
-
-**Message Signaled Interrupts (MSI)** replace the legacy pin assertion with a programmed memory write. Linux allocates one or more interrupt vectors and programs the message address/data into the endpoint’s MSI capability. When an event occurs, the device emits the MSI write; the root complex/interrupt controller interprets it as an interrupt.
-
-MSI vectors are exclusive in the sense that the allocated vector is not shared by unrelated devices. A device may have multiple MSI vectors, but classic MSI allocation requires a power-of-two contiguous vector count. MSI is still a device notification, not the data transfer itself.
-
-### 13.3 MSI-X
-
-MSI-X is a more flexible message-signaled scheme. The device provides a table of independently configurable vectors, allowing more vectors and less constrained allocation than MSI (up to 2048 table entries in the standard). Each vector can be individually masked and assigned an address/data message. Drivers commonly associate vectors with queues, ports, or event classes.
-
-### 13.4 Why prefer MSI/MSI-X
-
-- No shared physical INTx pin/IRQ handler chain in the normal allocation model; the handler knows which vector fired.
-- Avoids legacy pin routing and swizzling complications.
-- MSI signaling is ordered with preceding DMA writes under PCI ordering rules, avoiding the specific INTx DMA visibility race described in the Linux MSI guide.
-- Multiple vectors allow parallel or purpose-specific handling (for example, queue-per-vector).
-- MSI-X supports many independently configurable vectors and per-vector masking.
-- Avoids some level-triggered shared-interrupt storm failure modes.
-
-MSI/MSI-X still require correct device acknowledgment/clearing and DMA ordering discipline; they do not eliminate every race or driver bug.
-
-## 14. MSI/MSI-X in a Linux driver
-
-The common modern API is `pci_alloc_irq_vectors()`. The driver should allow fallback to INTx when it supports it, unless MSI-only operation is required by the hardware/driver design.
-
-```c
-int nvec;
-
-nvec = pci_alloc_irq_vectors(pdev, 1, max_vectors,
-                             PCI_IRQ_MSI | PCI_IRQ_MSIX | PCI_IRQ_INTX);
-if (nvec < 0)
-        return nvec;
-
-for (int i = 0; i < nvec; i++) {
-        int irq = pci_irq_vector(pdev, i);
-
-        ret = request_irq(irq, example_irq_handler, 0,
-                          "example", per_vector_context[i]);
-        if (ret)
-                goto err_free_irqs;
-}
-```
-
-On teardown, call `free_irq(pci_irq_vector(pdev, i), dev_id)` for each successfully registered vector, then `pci_free_irq_vectors(pdev)`. Error paths must free only handlers that were successfully registered. `pci_request_irq()` is also available as a helper on supported kernels.
-
-High-level sequence:
-
-1. Quiesce/mask device interrupt generation and clear stale causes.
-2. Request vectors using `pci_alloc_irq_vectors()` with minimum/maximum counts and allowed types.
-3. Obtain each Linux IRQ number with `pci_irq_vector()`.
-4. Register handlers with `request_irq()` or `pci_request_irq()`; choose the handler strategy based on whether Linux granted MSI/MSI-X or INTx if the behavior differs.
-5. Program device-specific interrupt routing/queue-to-vector registers.
-6. Enable device interrupt generation.
-7. During teardown, disable device interrupts, synchronize/free handlers, then free vectors.
-
-For a simple single-vector driver, set min=max=1. For MSI-X queue scaling, choose a useful maximum and handle fewer allocated vectors gracefully. Never assume the requested number was granted: use the positive return value from `pci_alloc_irq_vectors()`.
-
-## 15. Glossary and corrections to common mental models
+## 13. Glossary and corrections
 
 - **BDF is an identity/address for configuration access**, not an alternative to ECAM. ECAM or CF8/CFC is the access mechanism; BDF selects the function.
 - **A BAR assignment is an address range, not RAM allocation.** For MMIO, accesses route to the endpoint or its device memory.
 - **The BAR address and driver pointer are different.** The BAR stores a PCI address; `pci_iomap()` returns a CPU kernel virtual `__iomem` mapping.
 - **`pci_assign_resource()` does not map the BAR.** It asks PCI core to assign a range when needed. Claiming and mapping are separate operations.
-- **The four INTx names are not four CPU IRQs.** They are legacy pin identities; platform routing maps them to system/Linux IRQs, sometimes sharing.
-- **A function has one legacy INTx pin, not four independent pins.** MSI/MSI-X provide message vectors as a separate interrupt mechanism.
 - **Prefetchable does not mean automatically CPU-cached.** It marks access properties for the PCI resource/fabric; CPU mapping attributes are controlled separately.
 - **PCIe’s link is point-to-point, but its software view remains a bus hierarchy.** Bridges and switches create the tree used by BDF enumeration and routing.
 - **CPU internal fabric terminology is platform-specific.** The safe generic term is CPU/system interconnect; examples include SoC fabric and Intel UPI. The root complex/host bridge translates CPU-side transactions to PCIe TLPs.
 
-## 16. References
+
+## 14. References
 
 - Linux kernel, [How To Write Linux PCI Drivers](https://docs.kernel.org/PCI/pci.html)
 - Linux kernel, [PCI Support Library](https://docs.kernel.org/driver-api/pci/pci.html)
-- Linux kernel, [MSI Driver Guide HOWTO](https://docs.kernel.org/PCI/msi-howto.html)
 - Linux kernel, [PCI host controller drivers](https://docs.kernel.org/PCI/controller/pci-controller-drivers.html)
 - Linux kernel, [ACPI considerations for PCI host bridges](https://docs.kernel.org/PCI/acpi-info.html)
-- Linux kernel, [Generic IRQ handling](https://docs.kernel.org/core-api/genericirq.html)
 - Linux kernel, [Device I/O](https://docs.kernel.org/driver-api/device-io.html)
 - PCI-SIG, [PCIe 6.0 FAQ](https://pcisig.com/faq?field_category_value%5B%5D=pci_express_6.0&keys=PAM4)
 - PCI-SIG, [PCIe 7.0 FAQ](https://pcisig.com/faq?field_category_value%5B%5D=pci_express_7.0)
 - PCI-SIG, [PCIe 5.0 rates and link widths](https://pcisig.com/what-bit-rates-does-pcie-50-specification-support-and-how-does-it-compare-prior-pci-express-specifications)
 - PCI-SIG, [Why prefetchable terminology is changing](https://pcisig.com/PCIExpress/ECN/Base/RemovingPrefetchableTerminology)
 - Linux ath12k, [`drivers/net/wireless/ath/ath12k/pci.c`](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/ath/ath12k/pci.c)
-
