@@ -202,6 +202,14 @@ PCI functions expose three conceptual spaces:
 
 BARs (Base Address Registers) advertise a function’s I/O or memory resources. A BAR describes the size/type and stores the assigned **PCI bus address**. A memory BAR generally represents registers or device memory; it is not backed by host DRAM just because its address is in the CPU’s physical address space.
 
+### Configuration access versus MMIO access
+
+1. **Configuration-space access targets a function by BDF** (bus, device, function). During enumeration, for example, the host probes candidate BDFs by reading their configuration space. The platform’s configuration-access mechanism—such as ECAM or, on legacy x86, CF8/CFC—carries out that access.
+2. **MMIO on conventional PCI targets an address, not a BDF.** Because conventional PCI is a shared parallel bus, devices on that bus observe the address phase. The function whose BAR decoder matches the assigned address responds; the others ignore it.
+3. **MMIO on PCIe also targets an address, but the fabric routes it.** PCIe links are point-to-point, so a Memory TLP is forwarded through bridges and switches using address ranges and bridge windows toward the endpoint whose BAR covers that address. It is not broadcast for every endpoint in the hierarchy to listen to.
+
+In both PCI and PCIe, only the resource that decodes the address is meant to respond. BAR assignments and bridge windows make the address route unambiguous within the hierarchy.
+
 ### 8.1 BAR attributes
 
 - **I/O BAR vs Memory BAR:** BAR bit 0 identifies I/O space (1) or memory space (0).
