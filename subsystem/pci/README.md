@@ -300,7 +300,7 @@ The address seen in `regs` is a virtual mapping; the BAR contains a PCI bus addr
 
 PCI I/O port writes historically provide stronger completion behavior: the write reaches the device before the CPU proceeds past the I/O operation. MMIO writes can be **posted** in CPU, host bridge, or fabric buffers, allowing the CPU to continue before the endpoint observes them.
 
-If software must ensure a posted MMIO write has reached the device before continuing, a common technique is a safe read from the same device after the write. The read completion cannot return until earlier ordered writes to that device have passed through the relevant path. Use the device’s documented safe readback register and the Linux I/O accessors; barriers alone and `readl()` have distinct ordering roles, so follow the device/platform documentation.
+If the CPU must wait until an MMIO write has reached the endpoint, it can read a safe register from that same device after writing. The read is non-posted: the CPU waits for its response, and PCI ordering ensures the earlier writes to that device pass through before the read response returns. Use a register whose read has no unwanted side effect, and access it with an I/O accessor such as `readl()`. A memory barrier can order CPU operations, but by itself does not necessarily drain a posted write from the host bridge to the endpoint.
 
 Prefetchability and write posting are related to device I/O behavior but are separate properties: prefetchability describes whether certain speculative/combined operations are safe; posting describes when a write is considered complete to the CPU.
 

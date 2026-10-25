@@ -44,7 +44,7 @@ MSI-X is a more flexible message-signaled scheme. The device provides a table of
 
 - No shared physical INTx pin/IRQ handler chain in the normal allocation model; the handler knows which vector fired.
 - Avoids legacy pin routing and swizzling complications.
-- MSI signaling is ordered with preceding DMA writes under PCI ordering rules, avoiding the specific INTx DMA visibility race described in the Linux MSI guide.
+- With legacy INTx, the interrupt is signaled separately from DMA, so it can reach the CPU before earlier DMA writes have arrived in host memory; the handler may then read stale data. MSI is itself a memory-write message ordered after the function’s earlier DMA writes, so those writes have arrived before the handler runs. On non-coherent systems, the driver must still use the DMA API to synchronize device-written memory for CPU access.
 - Multiple vectors allow parallel or purpose-specific handling (for example, queue-per-vector).
 - MSI-X supports many independently configurable vectors and per-vector masking.
 - Avoids some level-triggered shared-interrupt storm failure modes.
@@ -89,9 +89,11 @@ For a simple single-vector driver, set min=max=1. For MSI-X queue scaling, choos
 
 ## 3. DMA visibility and interrupt readback
 
-A device may DMA data into host memory and then signal legacy INTx. With pin-based interrupts, the CPU can begin handling the interrupt before the device's earlier DMA writes are visible to the CPU. The Linux MSI guide describes reading a safe register from the interrupting device to ensure the earlier writes have arrived before the handler consumes the DMA data. This is a device MMIO register (typically in a BAR), not normally a PCI configuration-space register. The exact register and required ordering are device-specific.
+A device may DMA a receive descriptor or packet into host memory and then assert legacy INTx to notify the CPU. The DMA writes and pin-based interrupt are separate signals. The interrupt can reach the CPU before the DMA writes have drained through the PCI path into host memory, particularly when bridges have queued writes. If the handler immediately reads the descriptor, it can observe stale data even though the device has already raised its interrupt.
 
-MSI signaling is a memory write and PCI ordering rules ensure preceding DMA writes are visible before the MSI is delivered. This removes that particular pin-interrupt visibility race, but drivers must still follow the DMA API and device-specific ordering requirements.
+To close that ordering gap, the handler can perform a read from a safe register on the same device, usually an MMIO register in a BAR. The read is a non-posted transaction: its completion cannot return until earlier ordered writes from that device have reached the host. The handler waits for that read to complete before consuming the DMA-written data. Use a register whose read is safe for this purpose—for example, one that does not pop a FIFO or clear a status bit—and follow the device’s required ordering. This readback addresses PCI transaction ordering; it does not replace DMA API synchronization needed to make device-written memory visible on non-coherent architectures.
+
+With MSI, the interrupt itself is a memory-write message from the function. PCI ordering rules prevent that message from passing the function’s earlier DMA writes. Thus, when the MSI is delivered and the handler begins, those earlier writes have reached host memory, avoiding this specific INTx race. The DMA API’s cache synchronization requirements still apply on non-coherent systems.
 
 ## 4. Interrupt glossary
 
@@ -107,4 +109,3 @@ MSI signaling is a memory write and PCI ordering rules ensure preceding DMA writ
 - Linux kernel, [PCI host controller drivers](https://docs.kernel.org/PCI/controller/pci-controller-drivers.html)
 - Linux kernel, [ACPI considerations for PCI host bridges](https://docs.kernel.org/PCI/acpi-info.html)
 - Linux kernel, [Generic IRQ handling](https://docs.kernel.org/core-api/genericirq.html)
-
