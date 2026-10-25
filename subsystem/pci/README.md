@@ -327,3 +327,5 @@ Prefetchability and write posting are related to device I/O behavior but are sep
 - PCI-SIG, [PCIe 5.0 rates and link widths](https://pcisig.com/what-bit-rates-does-pcie-50-specification-support-and-how-does-it-compare-prior-pci-express-specifications)
 - PCI-SIG, [Why prefetchable terminology is changing](https://pcisig.com/PCIExpress/ECN/Base/RemovingPrefetchableTerminology)
 - Linux ath12k, [`drivers/net/wireless/ath/ath12k/pci.c`](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/ath/ath12k/pci.c)
+- [PCIe 3823 YouTube videos](https://www.youtube.com/@pcie3823/videos)
+- [PCIe video](https://www.youtube.com/watch?v=3ic61kJNEQ0)
